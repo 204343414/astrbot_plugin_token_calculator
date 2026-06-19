@@ -1,59 +1,41 @@
 {
-  "enabled": {
-    "description": "是否启用每用户Token额度限制功能（自然语言对话受限，指令不受影响）",
-    "type": "bool",
-    "default": true,
-    "hint": "关闭后将不再检查额度限制"
-  },
-  "default_quota": {
-    "description": "默认每个用户的最大Token额度（累计或每日）",
-    "type": "int",
-    "default": 1000000,
-    "hint": "单位：tokens"
-  },
-  "daily_reset": {
-    "description": "是否启用每日额度重置（true=每天重置一次，false=永久累计）",
-    "type": "bool",
-    "default": true
-  },
-  "daily_quota": {
-    "description": "每日额度（仅当 daily_reset=true 时生效）",
-    "type": "int",
-    "default": 500000,
-    "hint": "单位：tokens"
-  },
-  "user_quotas": {
-    "description": "特定用户额度覆盖（JSON格式，例如：{\"123456789\": 2000000}）",
-    "type": "string",
-    "default": "{}",
-    "hint": "请使用 JSON 格式填写 user_id: quota"
-  },
-  "admin_user_ids": {
-    "description": "管理员用户ID列表（JSON数组，例如：[\"123456789\", \"987654321\"]）",
-    "type": "string",
-    "default": "[]",
-    "hint": "请使用 JSON 数组格式填写管理员ID"
-  },
-  "track_completion_only": {
-    "description": "是否只统计 completion_tokens（bot 生成的回复）。false=统计 total_tokens（用户输入+bot输出，推荐）",
-    "type": "bool",
-    "default": false
-  },
-  "show_debug_info": {
-    "description": "默认是否开启详细 Debug 模式（显示 prompt/completion 拆分）",
-    "type": "bool",
-    "default": false
-  },
-  "default_quota": {
-    "description": "默认每个用户的最大Token额度（累计或每日）",
-    "type": "int",
-    "default": 200000,
-    "hint": "单位：tokens（建议群聊设置得小一点）"
-  },
-  "daily_quota": {
-    "description": "每日额度（仅当 daily_reset=true 时生效）",
-    "type": "int",
-    "default": 200000,
-    "hint": "单位：tokens"
-  }
+    "enabled": {
+        "description": "是否启用每用户Token额度限制功能（自然语言对话受限，指令不受影响）",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后将不再检查额度限制；管理员识别直接继承 AstrBot 全局 admins_id，无需在此配置"
+    },
+    "default_quota": {
+        "description": "累计模式下每个用户的最大 Token 额度（daily_reset=false 时生效）",
+        "type": "int",
+        "default": 1000000,
+        "hint": "单位：tokens"
+    },
+    "daily_reset": {
+        "description": "是否启用每日额度重置（true=每天 0 点重置，false=永久累计）",
+        "type": "bool",
+        "default": true
+    },
+    "daily_quota": {
+        "description": "每日额度（仅当 daily_reset=true 时生效）",
+        "type": "int",
+        "default": 500000,
+        "hint": "单位：tokens（群聊建议适当调小）"
+    },
+    "user_quotas": {
+        "description": "特定用户额度覆盖，JSON 字符串，例如 {\"123456789\": 2000000}",
+        "type": "string",
+        "default": "{}",
+        "hint": "请使用 JSON 格式填写 user_id: quota"
+    },
+    "track_completion_only": {
+        "description": "是否只统计 completion_tokens（仅 bot 输出）。false=统计 total_tokens（用户输入+bot输出，推荐）",
+        "type": "bool",
+        "default": false
+    },
+    "show_debug_info": {
+        "description": "默认是否开启详细 Debug 模式（显示 prompt/completion 拆分）",
+        "type": "bool",
+        "default": false
+    }
 }
