@@ -1,0 +1,37 @@
+{
+  "enabled": {
+    "description": "是否启用每用户Token额度限制功能（自然语言对话受限，指令不受影响）",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后将不再检查额度限制"
+  },
+  "default_quota": {
+    "description": "默认每个用户的最大Token额度（累计或每日）",
+    "type": "int",
+    "default": 1000000,
+    "hint": "单位：tokens"
+  },
+  "daily_reset": {
+    "description": "是否启用每日额度重置（true=每天重置一次，false=永久累计）",
+    "type": "bool",
+    "default": true
+  },
+  "daily_quota": {
+    "description": "每日额度（仅当 daily_reset=true 时生效）",
+    "type": "int",
+    "default": 500000,
+    "hint": "单位：tokens"
+  },
+  "user_quotas": {
+    "description": "特定用户额度覆盖（格式：{\"123456789\": 2000000}）",
+    "type": "object",
+    "default": {},
+    "hint": "user_id: quota，优先级高于默认额度"
+  },
+  "admin_user_ids": {
+    "description": "管理员用户ID列表（可使用 /token_reset 等管理命令）",
+    "type": "list",
+    "default": [],
+    "hint": "例如 [\"123456789\", \"987654321\"]"
+  }
+}
