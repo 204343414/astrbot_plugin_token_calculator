@@ -23,15 +23,15 @@
     "hint": "单位：tokens"
   },
   "user_quotas": {
-    "description": "特定用户额度覆盖（格式：{\"123456789\": 2000000}）",
-    "type": "object",
-    "default": {},
-    "hint": "user_id: quota，优先级高于默认额度"
+    "description": "特定用户额度覆盖（JSON格式，例如：{\"123456789\": 2000000}）",
+    "type": "string",
+    "default": "{}",
+    "hint": "请使用 JSON 格式填写 user_id: quota"
   },
   "admin_user_ids": {
-    "description": "管理员用户ID列表（可使用 /token_reset 等管理命令）",
-    "type": "list",
-    "default": [],
-    "hint": "例如 [\"123456789\", \"987654321\"]"
+    "description": "管理员用户ID列表（JSON数组，例如：[\"123456789\", \"987654321\"]）",
+    "type": "string",
+    "default": "[]",
+    "hint": "请使用 JSON 数组格式填写管理员ID"
   }
 }
