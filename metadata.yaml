@@ -1,6 +1,6 @@
 name: astrbot_plugin_token_calculator  # 这是你的插件的唯一识别名。
 desc: 计算并显示每次对话消耗的token。 # 插件简短描述
 help: 输入/CacuToken打开或关闭插件 。 # 插件的帮助信息
-version: v1.0.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.0.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: rinen0721 # 作者
-repo: https://github.com/rinen0721/astrbot_plugin_token_calculator # 插件的仓库地址
+repo: https://github.com/204343414/astrbot_plugin_token_calculator
