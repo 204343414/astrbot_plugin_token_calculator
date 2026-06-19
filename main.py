@@ -38,7 +38,27 @@ class TokenCalculator(Star):
             logger.warning(f"加载插件配置失败，使用默认值: {e}")
         
         self.enabled = self.plugin_config.get("enabled", True)
-        self.admin_ids = set(str(x) for x in self.plugin_config.get("admin_user_ids", []))
+        self.track_completion_only = self.plugin_config.get("track_completion_only", False)
+        self.debug_mode = self.plugin_config.get("show_debug_info", False)
+
+        # 自动读取 AstrBot 全局管理员列表（优先）
+        self.admin_ids = set()
+        try:
+            astrbot_admins = self.context.config.get("admins_id", [])
+            if isinstance(astrbot_admins, list):
+                self.admin_ids.update(str(x) for x in astrbot_admins)
+        except Exception:
+            pass
+
+        # 再合并插件自己配置的管理员
+        plugin_admins = self.plugin_config.get("admin_user_ids", [])
+        if isinstance(plugin_admins, str):
+            try:
+                import json as _json
+                plugin_admins = _json.loads(plugin_admins)
+            except:
+                plugin_admins = []
+        self.admin_ids.update(str(x) for x in plugin_admins)
         
         # 使用数据文件
         self.data_dir = os.path.join(os.path.dirname(__file__), "data")
@@ -94,9 +114,9 @@ class TokenCalculator(Star):
                 pass
         
         if self.plugin_config.get("daily_reset", True):
-            return int(self.plugin_config.get("daily_quota", 500000))
+            return int(self.plugin_config.get("daily_quota", 200000))
         else:
-            return int(self.plugin_config.get("default_quota", 1000000))
+            return int(self.plugin_config.get("default_quota", 200000))
 
     def _get_current_usage(self, user_id: str) -> int:
         """获取用户当前使用量（自动处理每日重置）"""
@@ -241,6 +261,25 @@ class TokenCalculator(Star):
         
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("token_reset_all")
+    async def token_reset_all(self, event: AstrMessageEvent):
+        """管理员一键重置所有用户的Token使用记录"""
+        admin_id = self._get_user_id(event)
+        if not self._is_admin(admin_id):
+            yield event.plain_result("只有管理员可以使用此命令")
+            return
+        
+        self.usage = {"users": {}}
+        self._save_usage()
+        yield event.plain_result("✅ 已重置所有用户的Token使用记录")
+
+    @filter.command("token_debug")
+    async def token_debug(self, event: AstrMessageEvent):
+        """切换 Debug 模式（显示 prompt/completion 拆分）"""
+        self.debug_mode = not self.debug_mode
+        status = "开启" if self.debug_mode else "关闭"
+        yield event.plain_result(f"Token Debug 模式已{status}（群聊测试推荐开启）")
+
     # ==================== 核心钩子 ====================
 
     @filter.on_llm_request()
@@ -281,10 +320,14 @@ class TokenCalculator(Star):
                 if completion is not None:
                     usage = getattr(completion, "usage", None)
                     if usage is not None:
-                        total_tokens = getattr(usage, "total_tokens", 0)
-                        if total_tokens > 0:
-                            self._add_usage(user_id, total_tokens)
-                            logger.info(f"用户 {user_id} 本次消耗 {total_tokens} tokens")
+                        if self.track_completion_only:
+                            tokens_to_add = getattr(usage, "completion_tokens", 0)
+                        else:
+                            tokens_to_add = getattr(usage, "total_tokens", 0)
+                        
+                        if tokens_to_add > 0:
+                            self._add_usage(user_id, tokens_to_add)
+                            logger.info(f"用户 {user_id} 本次消耗 {tokens_to_add} tokens (completion_only={self.track_completion_only})")
             except Exception as e:
                 logger.warning(f"记录用户Token使用量失败: {e}")
         
@@ -302,7 +345,11 @@ class TokenCalculator(Star):
                 completion_tokens = usage.completion_tokens
                 prompt_tokens = usage.prompt_tokens
                 total_tokens = usage.total_tokens
-                self.tokenMsg = f"(completion_tokens:{completion_tokens},prompt_tokens:{prompt_tokens},token总消耗:{total_tokens})"
+                
+                if self.debug_mode:
+                    self.tokenMsg = f"(prompt:{prompt_tokens}, completion:{completion_tokens}, total:{total_tokens})"
+                else:
+                    self.tokenMsg = f"(completion_tokens:{completion_tokens},prompt_tokens:{prompt_tokens},token总消耗:{total_tokens})"
                 self.llmResponsed = True
             except Exception:
                 self.tokenMsg = "(TokenCalculator插件无法获取信息或者出现未知错误)"
