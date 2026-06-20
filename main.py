@@ -273,9 +273,9 @@ class TokenCalculator(Star):
             return None
         return MessageEventResult().message(
             f"【Token额度限制】\n"
-            f"您的{self._mode_text()}今日额度已用尽（已用 {usage}/{quota} tokens）。\n"
-            f"今天聊的太久了。\n"
-            f"如果认为上下文太长，可输入/reset 重置上下文记忆。重要记忆好友解锁，可输入 /我的画像 查看自己的长期记忆。"
+            f"您的{self._mode_text()}每日token已用尽（已用 {usage}/{quota} tokens）。\n"
+            f"今天似乎聊的太久了喔。\n"
+            f"如果认为上下文太长，可输入/reset 重置上下文记忆。如需添加重要记忆，申请好友后解锁，可输入 /我的画像 查看自己的长期记忆。"
         ).stop_event()
 
     # ==================== 指令 ====================
