@@ -1,6 +1,6 @@
 name: astrbot_plugin_token_calculator
-desc: 计算并显示每次对话消耗的Token + 每用户额度限制（支持每日/累计，超额拦截自然语言对话）
-help: 输入/CacuToken打开或关闭Token显示；/token_toggle 开启额度限制；/token_usage 查询使用情况
-version: v1.3.0
+desc: 计算并显示每次对话消耗的Token + 每用户额度限制（支持每日/累计，超额硬拦截，支持自动上下文重置）
+help: 输入/CacuToken打开或关闭Token显示；/token_toggle 开启额度限制；/token_usage 查询使用情况；/token_test 可测试指定用户额度边界
+version: v1.5.0
 author: rinen0721 (enhanced by user)
 repo: https://github.com/204343414/astrbot_plugin_token_calculator

@@ -37,5 +37,23 @@
         "description": "默认是否开启详细 Debug 模式（显示 prompt/completion 拆分）",
         "type": "bool",
         "default": false
+    },
+    "quota_exceeded_response_mode": {
+        "description": "超额后如何处理：reply=回复提示并拦截；silent=静默拦截",
+        "type": "string",
+        "default": "reply",
+        "hint": "推荐群聊设为 silent，可完全避免超额用户继续触发 LLM 且不刷屏"
+    },
+    "auto_reset_context_tokens": {
+        "description": "自动清空当前会话上下文的 token 阈值（>0 生效）",
+        "type": "int",
+        "default": 0,
+        "hint": "例如填 120000，表示当当前会话最近一次上下文 token_usage >= 120000 时，下一次 LLM 请求前自动 reset 当前会话上下文"
+    },
+    "auto_reset_context_turns": {
+        "description": "自动清空当前会话上下文的轮数阈值（>0 生效，可选兜底）",
+        "type": "int",
+        "default": 0,
+        "hint": "按 user 轮数近似统计；如果你只想按 token 控制，可以保持 0"
     }
 }

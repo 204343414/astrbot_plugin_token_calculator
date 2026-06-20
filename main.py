@@ -4,28 +4,25 @@ from astrbot.api import logger
 from astrbot.core.message.components import Plain
 from astrbot.core.provider.entities import ProviderRequest, LLMResponse
 
-import os
 import json
+import os
 from datetime import date
-from typing import Dict, Any
+from typing import Any, Dict
 
 
 @register(
     "TokenCalculator",
     "rinen0721",
     "计算并显示每次 LLM 对话消耗的 Token，并支持每用户额度限制（自然语言对话超额拦截）",
-    "1.4.0",
+    "1.5.0",
     "https://github.com/204343414/astrbot_plugin_token_calculator",
 )
 class TokenCalculator(Star):
     cacuToken: bool = True
-    tokenMsg: str = ""
-    llmResponsed: bool = False
 
     def __init__(self, context: Context):
         super().__init__(context)
 
-        # 加载插件配置（_conf_schema.json 在 AstrBot 启动时会自动注入到 context.config[plugin_name]）
         self.plugin_config: Dict[str, Any] = {
             "enabled": True,
             "default_quota": 1000000,
@@ -34,7 +31,11 @@ class TokenCalculator(Star):
             "user_quotas": {},
             "track_completion_only": False,
             "show_debug_info": False,
+            "quota_exceeded_response_mode": "reply",
+            "auto_reset_context_tokens": 0,
+            "auto_reset_context_turns": 0,
         }
+
         try:
             plugin_name = "astrbot_plugin_token_calculator"
             cfg = self.context.config.get(plugin_name, {}) if hasattr(self.context, "config") else {}
@@ -45,8 +46,18 @@ class TokenCalculator(Star):
         self.enabled = bool(self.plugin_config.get("enabled", True))
         self.track_completion_only = bool(self.plugin_config.get("track_completion_only", False))
         self.debug_mode = bool(self.plugin_config.get("show_debug_info", False))
+        self.quota_exceeded_response_mode = self._normalize_response_mode(
+            self.plugin_config.get("quota_exceeded_response_mode", "reply")
+        )
+        self.auto_reset_context_tokens = self._safe_int(
+            self.plugin_config.get("auto_reset_context_tokens", 0),
+            0,
+        )
+        self.auto_reset_context_turns = self._safe_int(
+            self.plugin_config.get("auto_reset_context_turns", 0),
+            0,
+        )
 
-        # user_quotas 兼容 dict 或 JSON 字符串
         uq = self.plugin_config.get("user_quotas", {})
         if isinstance(uq, str):
             try:
@@ -57,21 +68,27 @@ class TokenCalculator(Star):
             str(k): int(v) for k, v in (uq or {}).items()
         }
 
-        # 数据文件
         self.data_dir = os.path.join(os.path.dirname(__file__), "data")
         os.makedirs(self.data_dir, exist_ok=True)
         self.usage_file = os.path.join(self.data_dir, "usage.json")
         self.usage: Dict[str, Any] = self._load_usage()
 
-        logger.info("TokenCalculator 插件已加载（含用户额度限制）")
+        logger.info("TokenCalculator 插件已加载（含用户额度限制 / 超额硬拦截 / 自动上下文重置）")
 
     # ==================== 工具方法 ====================
 
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _normalize_response_mode(self, value: Any) -> str:
+        mode = str(value or "reply").strip().lower()
+        return mode if mode in {"reply", "silent"} else "reply"
+
     def _is_admin(self, user_id: str) -> bool:
-        """
-        判断是否为管理员。
-        直接继承 AstrBot 全局 admins_id，无需插件自己维护管理员列表。
-        """
+        """判断是否为管理员（直接继承 AstrBot 全局 admins_id）"""
         try:
             raw = self.context.config.get("admins_id", []) if hasattr(self.context, "config") else []
             if isinstance(raw, list):
@@ -115,25 +132,27 @@ class TokenCalculator(Star):
             pass
         return str(event.unified_msg_origin)
 
+    def _ensure_user_entry(self, user_id: str) -> Dict[str, Any]:
+        if "users" not in self.usage:
+            self.usage["users"] = {}
+        if user_id not in self.usage["users"]:
+            self.usage["users"][user_id] = {
+                "cumulative_tokens": 0,
+                "daily_tokens": 0,
+                "daily_date": date.today().isoformat(),
+            }
+        return self.usage["users"][user_id]
+
     def _get_user_quota(self, user_id: str) -> int:
         """获取用户有效额度"""
         if user_id in self.user_quotas:
             return self.user_quotas[user_id]
         if self.plugin_config.get("daily_reset", True):
-            return int(self.plugin_config.get("daily_quota", 500000))
-        return int(self.plugin_config.get("default_quota", 1000000))
+            return self._safe_int(self.plugin_config.get("daily_quota", 500000), 500000)
+        return self._safe_int(self.plugin_config.get("default_quota", 1000000), 1000000)
 
-    def _get_current_usage(self, user_id: str) -> int:
-        """获取用户当前使用量（自动处理每日重置）"""
-        if "users" not in self.usage:
-            self.usage["users"] = {}
-
-        user_entry = self.usage["users"].get(user_id, {
-            "cumulative_tokens": 0,
-            "daily_tokens": 0,
-            "daily_date": date.today().isoformat(),
-        })
-
+    def _refresh_daily_if_needed(self, user_id: str) -> Dict[str, Any]:
+        user_entry = self._ensure_user_entry(user_id)
         today = date.today().isoformat()
         daily_reset = bool(self.plugin_config.get("daily_reset", True))
 
@@ -142,44 +161,127 @@ class TokenCalculator(Star):
             user_entry["daily_date"] = today
             self.usage["users"][user_id] = user_entry
             self._save_usage()
+        return user_entry
 
-        if daily_reset:
-            return int(user_entry.get("daily_tokens", 0))
-        return int(user_entry.get("cumulative_tokens", 0))
+    def _get_current_usage(self, user_id: str) -> int:
+        """获取用户当前使用量（自动处理每日重置）"""
+        user_entry = self._refresh_daily_if_needed(user_id)
+        if self.plugin_config.get("daily_reset", True):
+            return self._safe_int(user_entry.get("daily_tokens", 0), 0)
+        return self._safe_int(user_entry.get("cumulative_tokens", 0), 0)
 
-    def _add_usage(self, user_id: str, tokens: int):
-        """增加用户使用量"""
-        if "users" not in self.usage:
-            self.usage["users"] = {}
+    def _add_usage(self, user_id: str, tokens: int) -> tuple[int, int]:
+        """增加用户使用量，返回 (before_usage, after_usage)"""
+        user_entry = self._refresh_daily_if_needed(user_id)
+        before_usage = self._get_current_usage(user_id)
 
-        if user_id not in self.usage["users"]:
-            self.usage["users"][user_id] = {
-                "cumulative_tokens": 0,
-                "daily_tokens": 0,
-                "daily_date": date.today().isoformat(),
-            }
-
-        user_entry = self.usage["users"][user_id]
-        today = date.today().isoformat()
-        daily_reset = bool(self.plugin_config.get("daily_reset", True))
-
-        if daily_reset and user_entry.get("daily_date") != today:
-            user_entry["daily_tokens"] = 0
-            user_entry["daily_date"] = today
-
-        user_entry["cumulative_tokens"] = int(user_entry.get("cumulative_tokens", 0)) + tokens
-        if daily_reset:
-            user_entry["daily_tokens"] = int(user_entry.get("daily_tokens", 0)) + tokens
+        user_entry["cumulative_tokens"] = self._safe_int(
+            user_entry.get("cumulative_tokens", 0),
+            0,
+        ) + tokens
+        if self.plugin_config.get("daily_reset", True):
+            user_entry["daily_tokens"] = self._safe_int(
+                user_entry.get("daily_tokens", 0),
+                0,
+            ) + tokens
 
         self.usage["users"][user_id] = user_entry
         self._save_usage()
+        after_usage = self._get_current_usage(user_id)
+        return before_usage, after_usage
 
     def _mode_text(self) -> str:
         return "每日" if self.plugin_config.get("daily_reset", True) else "累计"
 
+    def _get_context_turns(self, req: ProviderRequest) -> int:
+        contexts = getattr(req, "contexts", []) or []
+        if isinstance(contexts, str):
+            try:
+                contexts = json.loads(contexts)
+            except Exception:
+                return 0
+        if not isinstance(contexts, list):
+            return 0
+
+        user_turns = sum(
+            1
+            for item in contexts
+            if isinstance(item, dict) and item.get("role") == "user"
+        )
+        return user_turns if user_turns > 0 else len(contexts) // 2
+
+    def _get_context_token_usage(self, req: ProviderRequest) -> int:
+        conversation = getattr(req, "conversation", None)
+        if conversation is None:
+            return 0
+        return self._safe_int(getattr(conversation, "token_usage", 0), 0)
+
+    async def _maybe_auto_reset_context(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> bool:
+        reasons = []
+        current_context_tokens = self._get_context_token_usage(req)
+        current_turns = self._get_context_turns(req)
+
+        if self.auto_reset_context_tokens > 0 and current_context_tokens > 0:
+            if current_context_tokens >= self.auto_reset_context_tokens:
+                reasons.append(
+                    f"context_tokens={current_context_tokens} >= {self.auto_reset_context_tokens}"
+                )
+
+        if self.auto_reset_context_turns > 0 and current_turns > 0:
+            if current_turns >= self.auto_reset_context_turns:
+                reasons.append(
+                    f"context_turns={current_turns} >= {self.auto_reset_context_turns}"
+                )
+
+        if not reasons:
+            return False
+
+        try:
+            conversation = getattr(req, "conversation", None)
+            conversation_id = getattr(conversation, "cid", None) if conversation else None
+            await self.context.conversation_manager.update_conversation(
+                event.unified_msg_origin,
+                conversation_id,
+                history=[],
+                token_usage=0,
+            )
+            if conversation is not None:
+                conversation.history = "[]"
+                conversation.token_usage = 0
+            req.contexts = []
+            if hasattr(event, "set_extra"):
+                event.set_extra("_clean_group_context_session", True)
+                event.set_extra(
+                    "_token_calculator_auto_reset_reason",
+                    " | ".join(reasons),
+                )
+            logger.warning(
+                f"[TokenCalculator] 自动重置上下文: user={self._get_user_id(event)} "
+                f"session={event.unified_msg_origin} reason={' | '.join(reasons)}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[TokenCalculator] 自动重置上下文失败: {e}")
+            return False
+
+    def _build_quota_exceeded_result(self, usage: int, quota: int) -> MessageEventResult | None:
+        if self.quota_exceeded_response_mode == "silent":
+            return None
+        return MessageEventResult().message(
+            f"【Token额度限制】\n"
+            f"您的{self._mode_text()}额度已用尽（已用 {usage}/{quota} tokens）。\n"
+            f"自然语言对话已暂停。\n"
+            f"请使用指令或联系管理员。"
+        ).stop_event()
+
     # ==================== 指令 ====================
 
     @filter.command("CacuToken")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def CacuToken(self, event: AstrMessageEvent):
         """切换 Token 计算显示"""
         self.cacuToken = not self.cacuToken
@@ -188,6 +290,7 @@ class TokenCalculator(Star):
         )
 
     @filter.command("token_toggle")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def token_toggle(self, event: AstrMessageEvent):
         """切换用户 Token 额度限制"""
         self.enabled = not self.enabled
@@ -240,15 +343,26 @@ class TokenCalculator(Star):
             yield event.plain_result("暂无使用记录")
             return
 
+        today = date.today().isoformat()
+        if self.plugin_config.get("daily_reset", True):
+            dirty = False
+            for uid, data in users.items():
+                if data.get("daily_date") != today and self._safe_int(data.get("daily_tokens", 0), 0) != 0:
+                    data["daily_tokens"] = 0
+                    data["daily_date"] = today
+                    dirty = True
+            if dirty:
+                self._save_usage()
+
         sorted_users = sorted(
             users.items(),
-            key=lambda x: x[1].get("cumulative_tokens", 0),
+            key=lambda x: self._safe_int(x[1].get("cumulative_tokens", 0), 0),
             reverse=True,
         )[:10]
         lines = ["【Token使用统计（前10名）】"]
         for uid, data in sorted_users:
-            cum = data.get("cumulative_tokens", 0)
-            daily = data.get("daily_tokens", 0)
+            cum = self._safe_int(data.get("cumulative_tokens", 0), 0)
+            daily = self._safe_int(data.get("daily_tokens", 0), 0)
             lines.append(f"{uid}: 累计 {cum} | 今日 {daily}")
         yield event.plain_result("\n".join(lines))
 
@@ -261,23 +375,76 @@ class TokenCalculator(Star):
         yield event.plain_result("✅ 已重置所有用户的Token使用记录")
 
     @filter.command("token_debug")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     async def token_debug(self, event: AstrMessageEvent):
         """切换 Debug 模式（显示 prompt/completion 拆分）"""
         self.debug_mode = not self.debug_mode
         status = "开启" if self.debug_mode else "关闭"
         yield event.plain_result(f"Token Debug 模式已{status}（群聊测试推荐开启）")
 
+    @filter.command("token_test")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def token_test(
+        self,
+        event: AstrMessageEvent,
+        target_user: str = None,
+        used_tokens: str = None,
+    ):
+        """
+        管理员测试命令：直接设置某个用户当前模式的已消耗 Token。
+        用法：/token_test <user_id> <used_tokens>
+        例子：/token_test 123456789 499900
+        """
+        if not target_user or used_tokens is None:
+            yield event.plain_result(
+                "用法：/token_test <user_id> <used_tokens>\n例：/token_test 123456789 499900"
+            )
+            return
+
+        tokens = self._safe_int(used_tokens, -1)
+        if tokens < 0:
+            yield event.plain_result("used_tokens 必须是大于等于 0 的整数")
+            return
+
+        entry = self._ensure_user_entry(str(target_user))
+        today = date.today().isoformat()
+        entry["daily_date"] = today
+
+        if self.plugin_config.get("daily_reset", True):
+            entry["daily_tokens"] = tokens
+            entry["cumulative_tokens"] = max(
+                self._safe_int(entry.get("cumulative_tokens", 0), 0),
+                tokens,
+            )
+        else:
+            entry["cumulative_tokens"] = tokens
+
+        self.usage["users"][str(target_user)] = entry
+        self._save_usage()
+
+        quota = self._get_user_quota(str(target_user))
+        remaining = max(0, quota - self._get_current_usage(str(target_user)))
+        yield event.plain_result(
+            f"【Token测试设置成功】\n"
+            f"用户ID: {target_user}\n"
+            f"模式: {self._mode_text()}\n"
+            f"当前已消耗: {self._get_current_usage(str(target_user))} tokens\n"
+            f"额度: {quota} tokens\n"
+            f"剩余: {remaining} tokens"
+        )
+
     # ==================== 核心钩子 ====================
 
     @filter.on_llm_request()
     async def check_user_quota(self, event: AstrMessageEvent, req: ProviderRequest):
-        """LLM 调用前检查用户额度（超额拦截自然语言对话）"""
+        """LLM 调用前检查用户额度（超额硬拦截）"""
+        await self._maybe_auto_reset_context(event, req)
+
         if not self.enabled:
             return
 
         user_id = self._get_user_id(event)
 
-        # 管理员无限制（直接继承 AstrBot 全局 admins_id）
         if self._is_admin(user_id):
             return
 
@@ -285,20 +452,18 @@ class TokenCalculator(Star):
         usage = self._get_current_usage(user_id)
 
         if usage >= quota:
-            event.set_result(
-                MessageEventResult().message(
-                    f"【Token额度限制】\n"
-                    f"您的{self._mode_text()}额度已用尽（已用 {usage}/{quota} tokens）。\n"
-                    f"自然语言对话已暂停。\n"
-                    f"请使用指令或联系管理员。"
-                )
+            result = self._build_quota_exceeded_result(usage, quota)
+            if result is not None:
+                event.set_result(result)
+            event.stop_event()
+            logger.warning(
+                f"[TokenCalculator] 用户 {user_id} Token额度超限，已硬拦截。"
+                f" usage={usage} quota={quota} mode={self.quota_exceeded_response_mode}"
             )
-            logger.info(f"用户 {user_id} Token额度超限，已拦截")
 
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
         """记录 Token 消耗 + 构造显示文本"""
-        # 1. 额度统计
         if self.enabled:
             try:
                 user_id = self._get_user_id(event)
@@ -306,55 +471,90 @@ class TokenCalculator(Star):
                 usage = getattr(completion, "usage", None) if completion else None
                 if usage is not None:
                     if self.track_completion_only:
-                        tokens_to_add = int(getattr(usage, "completion_tokens", 0) or 0)
+                        tokens_to_add = self._safe_int(
+                            getattr(usage, "completion_tokens", 0) or 0,
+                            0,
+                        )
                     else:
-                        tokens_to_add = int(getattr(usage, "total_tokens", 0) or 0)
+                        tokens_to_add = self._safe_int(
+                            getattr(usage, "total_tokens", 0) or 0,
+                            0,
+                        )
 
                     if tokens_to_add > 0:
-                        self._add_usage(user_id, tokens_to_add)
+                        before_usage, after_usage = self._add_usage(user_id, tokens_to_add)
+                        quota = self._get_user_quota(user_id)
                         logger.info(
                             f"用户 {user_id} 本次消耗 {tokens_to_add} tokens "
-                            f"(completion_only={self.track_completion_only})"
+                            f"(completion_only={self.track_completion_only}) "
+                            f"before={before_usage} after={after_usage} quota={quota}"
                         )
+                        if before_usage < quota <= after_usage:
+                            logger.warning(
+                                f"[TokenCalculator] 用户 {user_id} 已在本次响应后达到/超过额度，"
+                                f"后续请求将被拦截。after={after_usage} quota={quota}"
+                            )
             except Exception as e:
                 logger.warning(f"记录用户Token使用量失败: {e}")
 
-        # 2. 显示功能
         if self.cacuToken:
             try:
                 completion = getattr(resp, "raw_completion", None)
                 if completion is None or getattr(completion, "usage", None) is None:
-                    self.tokenMsg = "(无法获取Token用量信息，可能是当前provider不支持)"
+                    event.set_extra(
+                        "_token_calculator_msg",
+                        "(无法获取Token用量信息，可能是当前provider不支持)",
+                    )
                     return
                 usage = completion.usage
-                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+                completion_tokens = self._safe_int(
+                    getattr(usage, "completion_tokens", 0) or 0,
+                    0,
+                )
+                prompt_tokens = self._safe_int(
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    0,
+                )
+                total_tokens = self._safe_int(
+                    getattr(usage, "total_tokens", 0) or 0,
+                    0,
+                )
 
                 if self.debug_mode:
-                    self.tokenMsg = (
+                    token_msg = (
                         f"(prompt:{prompt_tokens}, "
                         f"completion:{completion_tokens}, "
                         f"total:{total_tokens})"
                     )
                 else:
-                    self.tokenMsg = (
+                    token_msg = (
                         f"(completion_tokens:{completion_tokens},"
                         f"prompt_tokens:{prompt_tokens},"
                         f"token总消耗:{total_tokens})"
                     )
-                self.llmResponsed = True
+                event.set_extra("_token_calculator_msg", token_msg)
             except Exception:
-                self.tokenMsg = "(TokenCalculator插件无法获取信息或者出现未知错误)"
+                event.set_extra(
+                    "_token_calculator_msg",
+                    "(TokenCalculator插件无法获取信息或者出现未知错误)",
+                )
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
         """在消息末尾追加 Token 信息"""
-        if self.cacuToken and self.llmResponsed:
-            try:
-                result = event.get_result()
-                chain = result.chain
-                chain.append(Plain(self.tokenMsg))
-                self.llmResponsed = False
-            except Exception:
-                raise RuntimeError("CacuToken插件在回复消息的时候出现错误")
+        if not self.cacuToken:
+            return
+
+        token_msg = event.get_extra("_token_calculator_msg")
+        if not token_msg:
+            return
+
+        try:
+            result = event.get_result()
+            if result is None:
+                return
+            if result.chain is None:
+                result.chain = []
+            result.chain.append(Plain(token_msg))
+        except Exception:
+            raise RuntimeError("CacuToken插件在回复消息的时候出现错误")
