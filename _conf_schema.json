@@ -3,7 +3,7 @@
         "description": "是否启用每用户Token额度限制功能（自然语言对话受限，指令不受影响）",
         "type": "bool",
         "default": true,
-        "hint": "关闭后将不再检查额度限制；管理员识别直接继承 AstrBot 全局 admins_id，无需在此配置"
+        "hint": "关闭后将不再检查额度限制，但用量统计仍在后台运行；管理员识别直接继承 AstrBot 全局 admins_id，无需在此配置"
     },
     "default_quota": {
         "description": "累计模式下每个用户的最大 Token 额度（daily_reset=false 时生效）",
@@ -34,9 +34,10 @@
         "default": false
     },
     "show_debug_info": {
-        "description": "默认是否开启详细 Debug 模式（显示 prompt/completion 拆分）",
+        "description": "Token 调试显示总开关（核心显示控制）",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "false=拟人模式，完全不显示token消耗，对话自然；true=调试模式，显示输入/输出/本轮/累计/剩余等详细信息。额度统计始终在后台运行"
     },
     "quota_exceeded_response_mode": {
         "description": "超额后如何处理：reply=回复提示并拦截；silent=静默拦截",
