@@ -14,11 +14,46 @@ from typing import Any, Dict
     "TokenCalculator",
     "rinen0721",
     "计算并显示每次 LLM 对话消耗的 Token，并支持每用户额度限制（自然语言对话超额拦截）",
-    "1.5.0",
+    "1.6.0",
     "https://github.com/204343414/astrbot_plugin_token_calculator",
 )
 class TokenCalculator(Star):
-    cacuToken: bool = True
+    """
+    TokenCalculator v1.6.0 (refurbished)
+
+    变更说明 (不改变原有额度/拦截核心逻辑):
+    - 显示开关统一由 show_debug_info / debug_mode 控制
+      * debug_mode = False (默认): 纯拟人模式，不在消息末尾追加任何 token 信息
+      * debug_mode = True : 追加丰富的 Token 调试信息 (输入/输出/本轮/累计/剩余等)
+    - 旧的 cacuToken 开关已合并为 debug_mode 的兼容属性，/CacuToken 命令保留为 /token_debug 的别名并提示已弃用
+    - token 用量统计与额度拦截始终在后台运行，与是否显示无关
+    - 用量统计现已与 enabled 解耦：即使关闭额度限制也会继续统计，便于 /token_usage /token_stats 查询
+    - 丰富 debug 输出格式，更清晰易读
+    - 小修缮：异常处理更稳健、消息拼接带换行、日志更详细等
+    """
+
+    # ---- 兼容属性：旧版 cacuToken 映射到 debug_mode ----
+    @property
+    def cacuToken(self) -> bool:
+        """向后兼容：旧代码读取 cacuToken 时返回 debug_mode"""
+        return getattr(self, "_debug_mode", False)
+
+    @cacuToken.setter
+    def cacuToken(self, value: bool):
+        self.debug_mode = bool(value)
+
+    # debug_mode 使用 property 以便同步配置
+    @property
+    def debug_mode(self) -> bool:
+        return getattr(self, "_debug_mode", False)
+
+    @debug_mode.setter
+    def debug_mode(self, value: bool):
+        val = bool(value)
+        self._debug_mode = val
+        # 同步到 plugin_config，便于其他地方读取
+        if hasattr(self, "plugin_config"):
+            self.plugin_config["show_debug_info"] = val
 
     def __init__(self, context: Context):
         super().__init__(context)
@@ -30,7 +65,7 @@ class TokenCalculator(Star):
             "daily_quota": 500000,
             "user_quotas": {},
             "track_completion_only": False,
-            "show_debug_info": False,
+            "show_debug_info": False,  # 关键：默认关闭，纯拟人
             "quota_exceeded_response_mode": "reply",
             "auto_reset_context_tokens": 0,
             "auto_reset_context_turns": 0,
@@ -45,7 +80,11 @@ class TokenCalculator(Star):
 
         self.enabled = bool(self.plugin_config.get("enabled", True))
         self.track_completion_only = bool(self.plugin_config.get("track_completion_only", False))
+
+        # 初始化 debug_mode（会同步到 plugin_config）
+        self._debug_mode = False
         self.debug_mode = bool(self.plugin_config.get("show_debug_info", False))
+
         self.quota_exceeded_response_mode = self._normalize_response_mode(
             self.plugin_config.get("quota_exceeded_response_mode", "reply")
         )
@@ -73,7 +112,11 @@ class TokenCalculator(Star):
         self.usage_file = os.path.join(self.data_dir, "usage.json")
         self.usage: Dict[str, Any] = self._load_usage()
 
-        logger.info("TokenCalculator 插件已加载（含用户额度限制 / 超额硬拦截 / 自动上下文重置）")
+        logger.info(
+            f"TokenCalculator 插件已加载 v1.6.0 "
+            f"(额度限制={'开' if self.enabled else '关'}, "
+            f"debug显示={'开' if self.debug_mode else '关(拟人模式)'})"
+        )
 
     # ==================== 工具方法 ====================
 
@@ -278,16 +321,61 @@ class TokenCalculator(Star):
             f"如果认为上下文太长，可输入/reset 重置上下文记忆。如需添加重要记忆，申请好友后解锁，可输入 /我的画像 查看自己的长期记忆。"
         ).stop_event()
 
+    def _build_debug_token_msg(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        user_id: str,
+        after_usage: int,
+        quota: int,
+        auto_reset_reason: str | None = None,
+        context_tokens: int = 0,
+        context_turns: int = 0,
+    ) -> str:
+        """构建丰富的 debug 显示文本"""
+        remaining = max(0, quota - after_usage)
+        mode_text = self._mode_text()
+        # 短 user_id 显示
+        short_uid = user_id if len(user_id) <= 12 else f"{user_id[:6]}...{user_id[-4:]}"
+
+        lines = [
+            "",
+            "—— Token Debug ——",
+            f"输入: {prompt_tokens} | 输出: {completion_tokens} | 本轮: {total_tokens}",
+            f"{mode_text}已用: {after_usage} / {quota} | 剩余: {remaining}",
+            f"用户: {short_uid}",
+        ]
+        # 上下文信息（如果有）
+        if context_tokens > 0 or context_turns > 0:
+            ctx_parts = []
+            if context_tokens > 0:
+                ctx_parts.append(f"上下文tokens≈{context_tokens}")
+            if context_turns > 0:
+                ctx_parts.append(f"轮数≈{context_turns}")
+            if ctx_parts:
+                lines.append(" | ".join(ctx_parts))
+
+        if auto_reset_reason:
+            lines.append(f"⚠️ 上下文已自动重置: {auto_reset_reason}")
+
+        return "\n".join(lines)
+
     # ==================== 指令 ====================
 
     @filter.command("CacuToken")
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def CacuToken(self, event: AstrMessageEvent):
-        """切换 Token 计算显示"""
-        self.cacuToken = not self.cacuToken
+        """兼容旧指令：切换 Token 调试显示 (已弃用，请用 /token_debug)"""
+        self.debug_mode = not self.debug_mode
+        status = "开启" if self.debug_mode else "关闭"
+        # cacuToken 属性已自动同步
         yield event.plain_result(
-            "开启计算Token功能" if self.cacuToken else "关闭计算Token功能"
+            f"【已弃用】CacuToken -> 已切换为 Token Debug {status}\n"
+            f"建议改用 /token_debug\n"
+            f"当前模式: {'调试显示开启' if self.debug_mode else '拟人模式（不显示token）'}"
         )
+        logger.info(f"[TokenCalculator] 通过旧指令 /CacuToken 切换 debug_mode -> {self.debug_mode}")
 
     @filter.command("token_toggle")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -295,7 +383,7 @@ class TokenCalculator(Star):
         """切换用户 Token 额度限制"""
         self.enabled = not self.enabled
         status = "开启" if self.enabled else "关闭"
-        yield event.plain_result(f"用户Token额度限制已{status}")
+        yield event.plain_result(f"用户Token额度限制已{status}（统计仍在后台运行）")
 
     @filter.command("token_usage")
     async def token_usage(self, event: AstrMessageEvent):
@@ -310,7 +398,8 @@ class TokenCalculator(Star):
             f"模式: {self._mode_text()}\n"
             f"已消耗: {usage} tokens\n"
             f"额度: {quota} tokens\n"
-            f"剩余: {remaining} tokens"
+            f"剩余: {remaining} tokens\n"
+            f"显示模式: {'Debug开启' if self.debug_mode else '拟人模式'}"
         )
 
     @filter.command("token_reset")
@@ -364,6 +453,7 @@ class TokenCalculator(Star):
             cum = self._safe_int(data.get("cumulative_tokens", 0), 0)
             daily = self._safe_int(data.get("daily_tokens", 0), 0)
             lines.append(f"{uid}: 累计 {cum} | 今日 {daily}")
+        lines.append(f"\n显示模式: {'Debug' if self.debug_mode else '拟人'} | 额度限制: {'开' if self.enabled else '关'}")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("token_reset_all")
@@ -380,7 +470,9 @@ class TokenCalculator(Star):
         """切换 Debug 模式（显示 prompt/completion 拆分）"""
         self.debug_mode = not self.debug_mode
         status = "开启" if self.debug_mode else "关闭"
-        yield event.plain_result(f"Token Debug 模式已{status}（群聊测试推荐开启）")
+        mode_desc = "调试显示开启，将显示输入/输出/本轮消耗等详细信息" if self.debug_mode else "已切回拟人模式，不再显示token消耗"
+        yield event.plain_result(f"Token Debug 模式已{status}\n{mode_desc}")
+        logger.info(f"[TokenCalculator] debug_mode 切换为 {self.debug_mode} by {self._get_user_id(event)}")
 
     @filter.command("token_test")
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -464,88 +556,111 @@ class TokenCalculator(Star):
     @filter.on_llm_response()
     async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
         """记录 Token 消耗 + 构造显示文本"""
-        if self.enabled:
-            try:
-                user_id = self._get_user_id(event)
+        user_id = self._get_user_id(event)
+        prompt_tokens = completion_tokens = total_tokens = 0
+        after_usage = before_usage = 0
+        quota = self._get_user_quota(user_id)
+
+        # 1. 统计用量（始终在后台运行，与 enabled / debug_mode 无关）
+        try:
+            completion = getattr(resp, "raw_completion", None)
+            usage = getattr(completion, "usage", None) if completion else None
+            if usage is not None:
+                prompt_tokens = self._safe_int(getattr(usage, "prompt_tokens", 0) or 0, 0)
+                completion_tokens = self._safe_int(getattr(usage, "completion_tokens", 0) or 0, 0)
+                total_tokens = self._safe_int(getattr(usage, "total_tokens", 0) or 0, 0)
+
+                if self.track_completion_only:
+                    tokens_to_add = completion_tokens
+                else:
+                    tokens_to_add = total_tokens or (prompt_tokens + completion_tokens)
+
+                if tokens_to_add > 0:
+                    before_usage, after_usage = self._add_usage(user_id, tokens_to_add)
+                    quota = self._get_user_quota(user_id)
+                    logger.info(
+                        f"用户 {user_id} 本次消耗 {tokens_to_add} tokens "
+                        f"(prompt={prompt_tokens}, completion={completion_tokens}) "
+                        f"before={before_usage} after={after_usage} quota={quota}"
+                    )
+                    if before_usage < quota <= after_usage:
+                        logger.warning(
+                            f"[TokenCalculator] 用户 {user_id} 已在本次响应后达到/超过额度，"
+                            f"后续请求将被拦截。after={after_usage} quota={quota}"
+                        )
+                else:
+                    # 即使本次 0 token，也读取当前用量用于显示
+                    after_usage = self._get_current_usage(user_id)
+            else:
+                after_usage = self._get_current_usage(user_id)
+        except Exception as e:
+            logger.warning(f"记录用户Token使用量失败: {e}")
+            after_usage = self._get_current_usage(user_id)
+
+        # 2. 构造调试显示文本（仅 debug_mode 开启时）
+        if not self.debug_mode:
+            # 拟人模式：清理可能残留的旧 extra，确保不显示
+            if hasattr(event, "set_extra"):
+                event.set_extra("_token_calculator_msg", None)
+            return
+
+        try:
+            if total_tokens == 0 and prompt_tokens == 0 and completion_tokens == 0:
+                # 尝试再次解析，以防上面统计分支未执行
                 completion = getattr(resp, "raw_completion", None)
                 usage = getattr(completion, "usage", None) if completion else None
-                if usage is not None:
-                    if self.track_completion_only:
-                        tokens_to_add = self._safe_int(
-                            getattr(usage, "completion_tokens", 0) or 0,
-                            0,
-                        )
-                    else:
-                        tokens_to_add = self._safe_int(
-                            getattr(usage, "total_tokens", 0) or 0,
-                            0,
-                        )
-
-                    if tokens_to_add > 0:
-                        before_usage, after_usage = self._add_usage(user_id, tokens_to_add)
-                        quota = self._get_user_quota(user_id)
-                        logger.info(
-                            f"用户 {user_id} 本次消耗 {tokens_to_add} tokens "
-                            f"(completion_only={self.track_completion_only}) "
-                            f"before={before_usage} after={after_usage} quota={quota}"
-                        )
-                        if before_usage < quota <= after_usage:
-                            logger.warning(
-                                f"[TokenCalculator] 用户 {user_id} 已在本次响应后达到/超过额度，"
-                                f"后续请求将被拦截。after={after_usage} quota={quota}"
-                            )
-            except Exception as e:
-                logger.warning(f"记录用户Token使用量失败: {e}")
-
-        if self.cacuToken:
-            try:
-                completion = getattr(resp, "raw_completion", None)
-                if completion is None or getattr(completion, "usage", None) is None:
+                if usage is None:
                     event.set_extra(
                         "_token_calculator_msg",
-                        "(无法获取Token用量信息，可能是当前provider不支持)",
+                        "\n\n(Token用量信息不可用，当前provider可能不支持)",
                     )
                     return
-                usage = completion.usage
-                completion_tokens = self._safe_int(
-                    getattr(usage, "completion_tokens", 0) or 0,
-                    0,
-                )
-                prompt_tokens = self._safe_int(
-                    getattr(usage, "prompt_tokens", 0) or 0,
-                    0,
-                )
-                total_tokens = self._safe_int(
-                    getattr(usage, "total_tokens", 0) or 0,
-                    0,
-                )
+                prompt_tokens = self._safe_int(getattr(usage, "prompt_tokens", 0) or 0, 0)
+                completion_tokens = self._safe_int(getattr(usage, "completion_tokens", 0) or 0, 0)
+                total_tokens = self._safe_int(getattr(usage, "total_tokens", 0) or 0, 0)
 
-                if self.debug_mode:
-                    token_msg = (
-                        f"(prompt:{prompt_tokens}, "
-                        f"completion:{completion_tokens}, "
-                        f"total:{total_tokens})"
-                    )
-                else:
-                    token_msg = (
-                        f"(completion_tokens:{completion_tokens},"
-                        f"prompt_tokens:{prompt_tokens},"
-                        f"token总消耗:{total_tokens})"
-                    )
-                event.set_extra("_token_calculator_msg", token_msg)
+            # 获取上下文自动重置原因（如果有）
+            auto_reset_reason = None
+            if hasattr(event, "get_extra"):
+                try:
+                    auto_reset_reason = event.get_extra("_token_calculator_auto_reset_reason")
+                except Exception:
+                    pass
+
+            # 尝试获取当前上下文状态用于显示
+            context_tokens = context_turns = 0
+            try:
+                # resp 阶段拿不到 req，这里只能显示 0，或从 event extra 尝试
+                pass
             except Exception:
-                event.set_extra(
-                    "_token_calculator_msg",
-                    "(TokenCalculator插件无法获取信息或者出现未知错误)",
-                )
+                pass
+
+            token_msg = self._build_debug_token_msg(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens or (prompt_tokens + completion_tokens),
+                user_id=user_id,
+                after_usage=after_usage or self._get_current_usage(user_id),
+                quota=quota,
+                auto_reset_reason=auto_reset_reason,
+                context_tokens=context_tokens,
+                context_turns=context_turns,
+            )
+            event.set_extra("_token_calculator_msg", token_msg)
+        except Exception as e:
+            logger.warning(f"构造 Token Debug 信息失败: {e}")
+            event.set_extra(
+                "_token_calculator_msg",
+                f"\n\n(TokenCalculator 显示异常: {e})",
+            )
 
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
-        """在消息末尾追加 Token 信息"""
-        if not self.cacuToken:
+        """在消息末尾追加 Token 信息（仅 debug_mode）"""
+        if not self.debug_mode:
             return
 
-        token_msg = event.get_extra("_token_calculator_msg")
+        token_msg = event.get_extra("_token_calculator_msg") if hasattr(event, "get_extra") else None
         if not token_msg:
             return
 
@@ -555,6 +670,10 @@ class TokenCalculator(Star):
                 return
             if result.chain is None:
                 result.chain = []
+            # 确保消息前有换行，避免粘连
+            if not str(token_msg).startswith("\n"):
+                token_msg = "\n" + str(token_msg)
             result.chain.append(Plain(token_msg))
-        except Exception:
-            raise RuntimeError("CacuToken插件在回复消息的时候出现错误")
+        except Exception as e:
+            logger.error(f"[TokenCalculator] 追加 Token 信息失败: {e}", exc_info=True)
+            # 不再抛 RuntimeError，避免打断正常回复
