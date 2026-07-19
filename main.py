@@ -153,10 +153,12 @@ class TokenCalculator(Star):
         return {"users": {}}
 
     def _save_usage(self):
-        """保存使用量数据"""
+        """保存使用量数据（原子写入）"""
         try:
-            with open(self.usage_file, "w", encoding="utf-8") as f:
+            tmp_path = self.usage_file + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.usage, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.usage_file)
         except Exception as e:
             logger.error(f"保存 usage.json 失败: {e}")
 
@@ -183,6 +185,7 @@ class TokenCalculator(Star):
                 "cumulative_tokens": 0,
                 "daily_tokens": 0,
                 "daily_date": date.today().isoformat(),
+                "warned_today": False,
             }
         return self.usage["users"][user_id]
 
@@ -544,10 +547,21 @@ class TokenCalculator(Star):
         usage = self._get_current_usage(user_id)
 
         if usage >= quota:
-            result = self._build_quota_exceeded_result(usage, quota)
+            user_entry = self._ensure_user_entry(user_id)
+            today = date.today().isoformat()
+            if user_entry.get("daily_date") != today:
+                user_entry["daily_tokens"] = 0
+                user_entry["daily_date"] = today
+                user_entry["warned_today"] = False
+                self._save_usage()
+            warned = user_entry.get("warned_today", False)
+            result = self._build_quota_exceeded_result(usage, quota) if not warned else None
             if result is not None:
                 event.set_result(result)
             event.stop_event()
+            user_entry["warned_today"] = True
+            self.usage["users"][user_id] = user_entry
+            self._save_usage()
             logger.warning(
                 f"[TokenCalculator] 用户 {user_id} Token额度超限，已硬拦截。"
                 f" usage={usage} quota={quota} mode={self.quota_exceeded_response_mode}"
